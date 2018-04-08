@@ -65,14 +65,14 @@ impl PartialEq for EvalAltResult {
 impl Error for EvalAltResult {
     fn description(&self) -> &str {
         match *self {
-            EvalAltResult::ErrorFunctionNotFound(_) => "Function not found",
+            EvalAltResult::ErrorFunctionNotFound(ref a) => "Function not found",
             EvalAltResult::ErrorFunctionArgMismatch => "Function argument types do not match",
             EvalAltResult::ErrorFunctionCallNotSupported => {
                 "Function call with > 2 argument not supported"
             }
             EvalAltResult::ErrorIndexMismatch => "Index does not match array",
             EvalAltResult::ErrorIfGuardMismatch => "If guards expect boolean expression",
-            EvalAltResult::ErrorVariableNotFound(_) => "Variable not found",
+            EvalAltResult::ErrorVariableNotFound(ref a) => "Variable not found",
             EvalAltResult::ErrorFunctionArityNotSupported => {
                 "Functions of more than 3 parameters are not yet supported"
             }
@@ -923,7 +923,7 @@ impl Engine {
         reg_op!(engine, "^", binary_xor, i32, i64, u32, u64);
         reg_op!(engine, "<<", left_shift, i32, i64, u32, u64);
         reg_op!(engine, ">>", right_shift, i32, i64, u32, u64);
-        reg_op!(engine, "%", modulo, i32, i64, u32, u64);
+        reg_op!(engine, "%", modulo, i32, i64, u32, u64, f64);
         engine.register_fn("~", pow_i64_i64);
         engine.register_fn("~", pow_f64_f64);
         engine.register_fn("~", pow_f64_i64);
