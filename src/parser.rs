@@ -373,9 +373,7 @@ impl<'a> TokenIterator<'a> {
                         return Err(LexError::MalformedEscapeSequence);
                     }
                 }
-                x if enclosing_char == x && escape => result.push(x),
                 x if enclosing_char == x && !escape => break,
-                _ if escape => return Err(LexError::MalformedEscapeSequence),
                 _ => {
                     escape = false;
                     result.push(nxt);
