@@ -23,4 +23,10 @@ fn test_if() {
     } else {
         assert!(false);
     }
+
+    if let Ok(result) = engine.eval::<i64>("let x = if true { 55 } else { 44 }; x") {
+        assert_eq!(result, 55);
+    } else {
+        assert!(false);
+    }
 }

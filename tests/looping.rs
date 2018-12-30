@@ -23,5 +23,22 @@ fn test_loop() {
 
 			x == 45
 		").unwrap()
+	);
+
+	assert_eq!(
+		engine.eval::<i64>("
+			let i = 0;
+
+			let r = loop {
+				if i < 10 {
+					i = i + 1;
+				}
+				else {
+					break 5;
+				}
+			}
+
+			r
+		").unwrap(), 5
 	)
 }

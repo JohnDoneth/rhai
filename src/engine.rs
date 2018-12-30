@@ -470,10 +470,30 @@ impl Engine {
                     }
                 }
                 Err(EvalAltResult::ErrorVariableNotFound(id.clone()))
-            }
+            },
+            Expr::IfElse(ref guard, ref body, ref else_body) => {
+                let guard_result = self.eval_expr(scope, guard)?;
+                match guard_result.downcast::<bool>() {
+                    Ok(g) => {
+                        if *g {
+                            self.eval_stmt(scope, body)
+                        } else {
+                            self.eval_stmt(scope, else_body)
+                        }
+                    }
+                    Err(_) => Err(EvalAltResult::ErrorIfGuardMismatch),
+                }
+            },
+            Expr::Loop(ref body) => loop {
+                match self.eval_stmt(scope, body) {
+                    Err(EvalAltResult::LoopBreak(x)) => return Ok(x),
+                    Err(x) => return Err(x),
+                    _ => (),
+                }
+            },
             Expr::Index(ref id, ref idx_raw) => {
                 self.array_value(scope, id, idx_raw).map(|(_, _, x)| x)
-            }
+            },
             Expr::Assignment(ref id, ref rhs) => {
                 let rhs_val = self.eval_expr(scope, rhs)?;
 
@@ -514,7 +534,7 @@ impl Engine {
                     }
                     _ => Err(EvalAltResult::ErrorAssignmentToUnknownLHS),
                 }
-            }
+            },
             Expr::Dot(ref lhs, ref rhs) => self.get_dot_val(scope, lhs, rhs),
             Expr::Array(ref contents) => {
                 let mut arr = Vec::new();
@@ -525,7 +545,7 @@ impl Engine {
                 }
 
                 Ok(Box::new(arr))
-            }
+            },
             Expr::FnCall(ref fn_name, ref args) => self.call_fn_raw(
                 fn_name.to_owned(),
                 args.iter()

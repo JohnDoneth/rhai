@@ -42,6 +42,7 @@ pub enum ParseError {
     MissingRSquare,
     MalformedCallExpr,
     MalformedIndexExpr,
+    MalformedIfElseExpr,
     VarExpectsIdentifier,
     FnMissingName,
     FnMissingParams,
@@ -59,6 +60,7 @@ impl Error for ParseError {
             ParseError::MissingRSquare => "Expected ']'",
             ParseError::MalformedCallExpr => "Call contains bad expression",
             ParseError::MalformedIndexExpr => "Indexing expression missing correct index",
+            ParseError::MalformedIfElseExpr => "'if' expression missing else branch",
             ParseError::VarExpectsIdentifier => "'var' expects the name of a variable",
             ParseError::FnMissingName => "Function declaration is missing name",
             ParseError::FnMissingParams => "Function declaration is missing parameters",
@@ -108,6 +110,8 @@ pub enum Expr {
     Dot(Box<Expr>, Box<Expr>),
     Index(String, Box<Expr>),
     Array(Vec<Expr>),
+    Loop(Box<Stmt>),
+    IfElse(Box<Expr>, Box<Stmt>, Box<Stmt>),
     True,
     False,
     Unit,
@@ -879,7 +883,26 @@ fn parse_array_expr(input: &mut Peekable<TokenIterator>) -> Result<Expr, ParseEr
         }
         _ => Err(ParseError::MissingRSquare),
     }
+}
 
+fn parse_if_expr(input: &mut Peekable<TokenIterator>) -> Result<Expr, ParseError> {
+    let guard = parse_expr(input)?;
+    let body = parse_block(input)?;
+
+    match input.peek() {
+        Some(&Token::Else) => {
+            input.next();
+            let else_body = parse_block(input)?;
+            Ok(Expr::IfElse(Box::new(guard), Box::new(body), Box::new(else_body)))
+        }
+        _ => Err(ParseError::MalformedIfElseExpr),
+    }
+}
+
+fn parse_loop_expr(input: &mut Peekable<TokenIterator>) -> Result<Expr, ParseError> {
+    let body = parse_block(input)?;
+
+    Ok(Expr::Loop(Box::new(body)))
 }
 
 fn parse_primary(input: &mut Peekable<TokenIterator>) -> Result<Expr, ParseError> {
@@ -890,6 +913,8 @@ fn parse_primary(input: &mut Peekable<TokenIterator>) -> Result<Expr, ParseError
             Token::StringConst(ref s) => Ok(Expr::StringConst(s.clone())),
             Token::CharConst(ref c) => Ok(Expr::CharConst(*c)),
             Token::Identifier(ref s) => parse_ident_expr(s.clone(), input),
+            Token::If => parse_if_expr(input),
+            Token::Loop => parse_loop_expr(input),
             Token::LParen => parse_paren_expr(input),
             Token::LSquare => parse_array_expr(input),
             Token::True => Ok(Expr::True),
