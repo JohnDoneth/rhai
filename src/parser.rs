@@ -91,6 +91,7 @@ pub enum Stmt {
     Block(Vec<Stmt>),
     Expr(Box<Expr>),
     Break,
+    BreakWithVal(Box<Expr>),
     Return,
     ReturnWithVal(Box<Expr>),
 }
@@ -1175,7 +1176,13 @@ fn parse_stmt(input: &mut Peekable<TokenIterator>) -> Result<Stmt, ParseError> {
         Some(&Token::Loop) => parse_loop(input),
         Some(&Token::Break) => {
             input.next();
-            Ok(Stmt::Break)
+            match input.peek() {
+                Some(&Token::Semicolon) => Ok(Stmt::Break),
+                _ => {
+                    let ret = parse_expr(input)?;
+                    Ok(Stmt::BreakWithVal(Box::new(ret)))
+                }
+            }
         }
         Some(&Token::Return) => {
             input.next();

@@ -25,7 +25,7 @@ pub enum EvalAltResult {
     ErrorMismatchOutputType(String),
     ErrorCantOpenScriptFile,
     InternalErrorMalformedDotExpression,
-    LoopBreak,
+    LoopBreak(Box<Any>),
     Return(Box<Any>),
 }
 
@@ -56,7 +56,6 @@ impl PartialEq for EvalAltResult {
             (&ErrorMismatchOutputType(ref a), &ErrorMismatchOutputType(ref b)) => a == b,
             (&ErrorCantOpenScriptFile, &ErrorCantOpenScriptFile) => true,
             (&InternalErrorMalformedDotExpression, &InternalErrorMalformedDotExpression) => true,
-            (&LoopBreak, &LoopBreak) => true,
             _ => false,
         }
     }
@@ -84,7 +83,7 @@ impl Error for EvalAltResult {
             EvalAltResult::InternalErrorMalformedDotExpression => {
                 "[Internal error] Unexpected expression in dot expression"
             }
-            EvalAltResult::LoopBreak => "Loop broken before completion (not an error)",
+            EvalAltResult::LoopBreak(_) => "Loop broken before completion (not an error)",
             EvalAltResult::Return(_) => "Function returned value (not an error)",
         }
     }
@@ -596,7 +595,7 @@ impl Engine {
                     Ok(g) => {
                         if *g {
                             match self.eval_stmt(scope, body) {
-                                Err(EvalAltResult::LoopBreak) => return Ok(Box::new(())),
+                                Err(EvalAltResult::LoopBreak(x)) => return Ok(x),
                                 Err(x) => return Err(x),
                                 _ => (),
                             }
@@ -609,12 +608,16 @@ impl Engine {
             },
             Stmt::Loop(ref body) => loop {
                 match self.eval_stmt(scope, body) {
-                    Err(EvalAltResult::LoopBreak) => return Ok(Box::new(())),
+                    Err(EvalAltResult::LoopBreak(x)) => return Ok(x),
                     Err(x) => return Err(x),
                     _ => (),
                 }
             },
-            Stmt::Break => Err(EvalAltResult::LoopBreak),
+            Stmt::Break => Err(EvalAltResult::LoopBreak(Box::new(()))),
+            Stmt::BreakWithVal(ref a) => {
+                let result = self.eval_expr(scope, a)?;
+                Err(EvalAltResult::LoopBreak(result))
+            }
             Stmt::Return => Err(EvalAltResult::Return(Box::new(()))),
             Stmt::ReturnWithVal(ref a) => {
                 let result = self.eval_expr(scope, a)?;
