@@ -1,4 +1,5 @@
 use std::any::TypeId;
+use std::iter::once;
 use std::borrow::Borrow;
 use std::cmp::{PartialEq, PartialOrd};
 use std::collections::HashMap;
@@ -9,8 +10,50 @@ use std::sync::Arc;
 
 use any::{Any, AnyExt};
 use call::FunArgs;
-use fn_register::{Mut, RegisterFn};
+use fn_register::{RegisterFn, RegisterTypeFn};
 use parser::{lex, parse, Expr, FnDef, Stmt};
+
+#[macro_export]
+macro_rules! register_type {
+    ($engine:expr, $name:ident) => {
+        $engine.register_type(
+            Type::new::<$name>(stringify!($name))
+        );
+    };
+    ($engine:expr, $name:ident, fields: $($field:ident),+ ; functions: $($function:ident),+) => {
+        $engine.register_type(
+            Type::new::<$name>(stringify!($name))
+            $(
+                .add_field(stringify!($field),
+                    Box::new(|s: &$name|s.$field),
+                    Some(Box::new(|s: &mut $name, v|{s.$field = v}))
+                )
+            )+
+            $(
+                .add_function(stringify!($function), $name::$function)
+            )+
+        );
+    };
+    ($engine:expr, $name:ident, fields: $($field:ident),+) => {
+        $engine.register_type(
+            Type::new::<$name>(stringify!($name))
+            $(
+                .add_field(stringify!($field),
+                    Box::new(|s: &$name|s.$field),
+                    Some(Box::new(|s: &mut $name, v|{s.$field = v}))
+                )
+            )+
+        );
+    };
+    ($engine:expr, $name:ident, functions: $($function:ident),+) => {
+        $engine.register_type(
+            Type::new::<$name>(stringify!($name))
+            $(
+                .add_function(stringify!($function), $name::$function)
+            )+
+        );
+    };
+}
 
 #[derive(Debug)]
 pub enum EvalAltResult {
@@ -22,9 +65,11 @@ pub enum EvalAltResult {
     ErrorVariableNotFound(String),
     ErrorFunctionArityNotSupported,
     ErrorAssignmentToUnknownLHS,
+    ErrorUnregisteredType(String),
     ErrorMismatchOutputType(String),
     ErrorCantOpenScriptFile,
     InternalErrorMalformedDotExpression,
+    InternalErrorMalformedDoubleColonCall,
     LoopBreak(Box<Any>),
     Return(Box<Any>),
 }
@@ -35,6 +80,7 @@ impl EvalAltResult {
             EvalAltResult::ErrorVariableNotFound(ref s) => Some(s.as_str()),
             EvalAltResult::ErrorFunctionNotFound(ref s) => Some(s.as_str()),
             EvalAltResult::ErrorMismatchOutputType(ref s) => Some(s.as_str()),
+            EvalAltResult::ErrorUnregisteredType(ref s) => Some(s.as_str()),
             _ => None,
         }
     }
@@ -54,8 +100,10 @@ impl PartialEq for EvalAltResult {
             (&ErrorFunctionArityNotSupported, &ErrorFunctionArityNotSupported) => true,
             (&ErrorAssignmentToUnknownLHS, &ErrorAssignmentToUnknownLHS) => true,
             (&ErrorMismatchOutputType(ref a), &ErrorMismatchOutputType(ref b)) => a == b,
+            (&ErrorUnregisteredType(ref a), &ErrorUnregisteredType(ref b)) => a == b,
             (&ErrorCantOpenScriptFile, &ErrorCantOpenScriptFile) => true,
             (&InternalErrorMalformedDotExpression, &InternalErrorMalformedDotExpression) => true,
+            (&InternalErrorMalformedDoubleColonCall, &InternalErrorMalformedDoubleColonCall) => true,
             _ => false,
         }
     }
@@ -79,9 +127,13 @@ impl Error for EvalAltResult {
                 "Assignment to an unsupported left-hand side"
             }
             EvalAltResult::ErrorMismatchOutputType(_) => "Cast of output failed",
+            EvalAltResult::ErrorUnregisteredType(_) => "Unknown type",
             EvalAltResult::ErrorCantOpenScriptFile => "Cannot open script file",
             EvalAltResult::InternalErrorMalformedDotExpression => {
                 "[Internal error] Unexpected expression in dot expression"
+            }
+            EvalAltResult::InternalErrorMalformedDoubleColonCall => {
+                "[Internal error] Unexpected expression in double colon expression"
             }
             EvalAltResult::LoopBreak(_) => "Loop broken before completion (not an error)",
             EvalAltResult::Return(_) => "Function returned value (not an error)",
@@ -109,6 +161,28 @@ pub struct FnSpec {
     args: Option<Vec<TypeId>>,
 }
 
+impl FnSpec {
+    pub fn new(ident: String, args: Option<Vec<TypeId>>) -> FnSpec {
+        FnSpec { ident, args }
+    }
+}
+
+#[derive(Clone)]
+pub struct TypeSpec {
+    id: TypeId,
+    name: String,
+    fields: HashMap<String, (Arc<Box<FnGetter>>, Option<Arc<Box<FnSetter>>>)>,
+    functions: HashMap<FnSpec, Arc<Box<FnAny>>>,
+}
+
+impl TypeSpec {
+    pub fn new(id: TypeId, name: String, fields: HashMap<String, (Arc<Box<FnGetter>>, Option<Arc<Box<FnSetter>>>)>,
+               functions: HashMap<FnSpec, Arc<Box<FnAny>>>) -> TypeSpec {
+
+        TypeSpec { id, name, fields, functions }
+    }
+}
+
 /// Rhai's engine type. This is what you use to run Rhai scripts
 ///
 /// ```rust
@@ -128,6 +202,7 @@ pub struct Engine {
     /// A hashmap containing all functions known to the engine
     pub fns: HashMap<FnSpec, Arc<FnIntExt>>,
     pub type_names: HashMap<TypeId, String>,
+    pub types: HashMap<String, Arc<TypeSpec>>,
 }
 
 pub enum FnIntExt {
@@ -135,6 +210,8 @@ pub enum FnIntExt {
     Int(FnDef),
 }
 
+pub type FnGetter = Fn(&Any) -> Result<Box<Any>, EvalAltResult>;
+pub type FnSetter = Fn(&mut Any, Box<Any>) -> Result<(), EvalAltResult>;
 pub type FnAny = Fn(Vec<&mut Any>) -> Result<Box<Any>, EvalAltResult>;
 
 /// A type containing information about current scope.
@@ -153,6 +230,55 @@ pub type FnAny = Fn(Vec<&mut Any>) -> Result<Box<Any>, EvalAltResult>;
 /// Between runs, `Engine` only remembers functions when not using own `Scope`.
 pub type Scope = Vec<(String, Box<Any>)>;
 
+pub struct Type {
+    id: TypeId,
+    name: String,
+    fields: HashMap<String, (Arc<Box<FnGetter>>, Option<Arc<Box<FnSetter>>>)>,
+    functions: HashMap<FnSpec, Arc<Box<FnAny>>>
+}
+
+impl Type {
+    pub fn new<T: Any>(name: &str) -> Type {
+        Type {
+            id: TypeId::of::<T>(),
+            name: name.to_string(),
+            fields: HashMap::new(),
+            functions: HashMap::new()
+        }
+    }
+
+    pub fn add_field<T, U, G, S>(mut self, name: &str, getter: Box<G>, setter: Option<Box<S>>) -> Type
+        where
+            T: Clone + Any,
+            U: Clone + Any,
+            G: 'static + Fn(&T) -> U,
+            S: 'static + Fn(&mut T, U) -> ()
+    {
+        let getter = Arc::new(Box::new(move |this_ptr: &Any| {
+            if let Some(this_ptr) = this_ptr.downcast_ref::<T>() {
+                Ok(Box::new(getter(this_ptr)) as Box<Any>)
+            } else {
+                Err(EvalAltResult::ErrorFunctionArgMismatch)
+            }
+        }) as Box<FnGetter>);
+        let setter = if let Some(setter) = setter {
+            Some(Arc::new(Box::new(move |this_ptr: &mut Any, new_val: Box<Any>| {
+                let mut this_ptr = this_ptr.downcast_mut::<T>();
+                if let Ok(new_val) = new_val.clone().downcast::<U>() {
+                    setter(this_ptr.unwrap(), *new_val);
+                    Ok(())
+                } else {
+                    Err(EvalAltResult::ErrorFunctionArgMismatch)
+                }
+            }) as Box<FnSetter>))
+        } else {
+            None
+        };
+        self.fields.insert(name.to_string(), (getter, setter));
+        self
+    }
+}
+
 impl Engine {
     pub fn call_fn<'a, I, A, T>(&self, ident: I, args: A) -> Result<T, EvalAltResult>
     where
@@ -165,7 +291,7 @@ impl Engine {
             .and_then(|b| {
                 b.downcast()
                     .map(|b| *b)
-                    .map_err(|a| EvalAltResult::ErrorMismatchOutputType(self.nice_type_name(a)))
+                    .map_err(|a| EvalAltResult::ErrorMismatchOutputType(self.format_type(a.type_id())))
             })
     }
 
@@ -183,24 +309,22 @@ impl Engine {
             args.iter().map(|x| (&**x).type_id()).collect::<Vec<_>>()
         );
 
-        let spec = FnSpec {
-            ident: ident.clone(),
-            args: Some(args.iter().map(|a| <Any as Any>::type_id(&**a)).collect()),
-        };
+        let spec = FnSpec::new(
+            ident.clone(),
+            if !args.is_empty() {
+                Some(args.iter().map(|a| Any::type_id(&**a)).collect())
+            } else {
+                None
+            }
+        );
 
-        let spec1 = FnSpec {
-            ident: ident.clone(),
-            args: None,
-        };
         let prev_len = scope.len();
         let res = self
-            .fns
-            .get(&spec)
-            .or_else(|| self.fns.get(&spec1))
+            .fns.get(&spec)
             .ok_or_else(|| {
                 let typenames = args
                     .iter()
-                    .map(|x| self.nice_type_name((&**x).box_clone()))
+                    .map(|x| self.format_type((&**x).type_id()))
                     .collect::<Vec<_>>();
                 EvalAltResult::ErrorFunctionNotFound(format!("{} ({})", ident, typenames.join(",")))
             }).and_then(|f| match **f {
@@ -228,54 +352,69 @@ impl Engine {
     pub fn register_fn_raw(&mut self, ident: String, args: Option<Vec<TypeId>>, f: Box<FnAny>) {
         debug_println!("Register; {:?} with args {:?}", ident, args);
 
-        let spec = FnSpec { ident, args };
-
+        let spec = FnSpec::new(ident, args);
         self.fns.insert(spec, Arc::new(FnIntExt::Ext(f)));
     }
 
-    /// Register a type for use with Engine. Keep in mind that
-    /// your type must implement Clone.
-    pub fn register_type<T: Any>(&mut self) {
-        // currently a no-op, exists for future extensibility
+    /// Register a type
+    pub fn register_type(&mut self, ty: Type) {
+        let Type {id, name, fields, functions} = ty;
+        self.type_names.insert(id.clone(), name.clone());
+        self.types.insert(name.clone(), Arc::new(TypeSpec {
+            id, name, fields, functions
+        }));
     }
 
-    /// Register a type, providing a name for nice error messages.
-    pub fn register_type_name<T: Any>(&mut self, name: &str) {
-        self.register_type::<T>();
-        debug_println!("register type {}: {:?}", name, TypeId::of::<T>());
-        self.type_names.insert(TypeId::of::<T>(), name.into());
+    fn find_type(&self, tid: &TypeId) -> Result<Arc<TypeSpec>, EvalAltResult> {
+        if let Some(type_name) = self.type_names.get(tid) {
+            if let Some(ty) = self.types.get(type_name).cloned() {
+                Ok(ty)
+            } else {
+                Err(EvalAltResult::ErrorUnregisteredType(format!("{}", type_name)))
+            }
+        } else {
+            Err(EvalAltResult::ErrorUnregisteredType(format!("<unknown> {:?}", tid)))
+        }
     }
 
-    /// Register a get function for a member of a registered type
-    pub fn register_get<T: Clone + Any, U: Clone + Any, F>(&mut self, name: &str, get_fn: F)
-    where
-        F: 'static + Fn(&mut T) -> U,
-    {
-        let get_name = "get$".to_string() + name;
-        self.register_fn(&get_name, get_fn);
+    fn find_getter(&self, tid: &TypeId, name: &String) -> Result<Arc<Box<FnGetter>>, EvalAltResult> {
+        let ty = self.find_type(tid)?;
+
+        if let Some((g, s)) = ty.fields.get(name) {
+            Ok(g.clone())
+        } else {
+            Err(EvalAltResult::ErrorVariableNotFound(format!("{}.{}", ty.name, name)))
+        }
     }
 
-    /// Register a set function for a member of a registered type
-    pub fn register_set<T: Clone + Any, U: Clone + Any, F>(&mut self, name: &str, set_fn: F)
-    where
-        F: 'static + Fn(&mut T, U) -> (),
-    {
-        let set_name = "set$".to_string() + name;
-        self.register_fn(&set_name, set_fn);
+    fn find_setter(&self, tid: &TypeId, name: &String) -> Result<Arc<Box<FnSetter>>, EvalAltResult> {
+        let ty = self.find_type(tid)?;
+
+        if let Some((g, s)) = ty.fields.get(name) {
+            if let Some(s) = s {
+                return Ok(s.clone());
+            }
+        }
+        Err(EvalAltResult::ErrorVariableNotFound(format!("{}.{}", ty.name, name)))
     }
 
-    /// Shorthand for registering both getters and setters
-    pub fn register_get_set<T: Clone + Any, U: Clone + Any, F, G>(
-        &mut self,
-        name: &str,
-        get_fn: F,
-        set_fn: G,
-    ) where
-        F: 'static + Fn(&mut T) -> U,
-        G: 'static + Fn(&mut T, U) -> (),
-    {
-        self.register_get(name, get_fn);
-        self.register_set(name, set_fn);
+    fn find_type_fn(&self, tid: &TypeId, name: &String, args: &Vec<&mut Any>) -> Result<Arc<Box<FnAny>>, EvalAltResult> {
+        let ty = self.find_type(tid)?;
+
+        let spec = FnSpec::new(
+            name.clone(),
+            Some(args.iter().map(|a| Any::type_id(&**a)).collect())
+        );
+        if let Some(f) = ty.functions.get(&spec) {
+            Ok(f.clone())
+        } else {
+            let typenames = args
+                .iter()
+                .map(|x| self.format_type((&**x).type_id()))
+                .skip(1)
+                .collect::<Vec<_>>();
+            Err(EvalAltResult::ErrorFunctionNotFound(format!("{}.{}({})", ty.name, name, typenames.join(","))))
+        }
     }
 
     fn get_dot_val_helper(
@@ -284,31 +423,36 @@ impl Engine {
         this_ptr: &mut Any,
         dot_rhs: &Expr,
     ) -> Result<Box<Any>, EvalAltResult> {
-        use std::iter::once;
-
         match *dot_rhs {
             Expr::FnCall(ref fn_name, ref args) => {
+                let type_id = Any::type_id(this_ptr);
+
                 let mut args: Vec<Box<Any>> = args
                     .iter()
                     .map(|arg| self.eval_expr(scope, arg))
                     .collect::<Result<Vec<_>, _>>()?;
-                let args = once(this_ptr)
+                let args: Vec<&mut Any> = once(this_ptr)
                     .chain(args.iter_mut().map(|b| b.as_mut()))
                     .collect();
 
-                self.call_fn_raw(fn_name.to_owned(), args, scope)
+                match self.find_type_fn(&type_id, fn_name, &args) {
+                    Ok(f) => f(args),
+                    Err(e) => match e {
+                        EvalAltResult::ErrorUnregisteredType(s) => {
+                            self.call_fn_raw(fn_name.to_owned(), args, scope)
+                        },
+                        other => Err(other)
+                    }
+                }
             }
             Expr::Identifier(ref id) => {
-                let get_fn_name = "get$".to_string() + id;
-
-                self.call_fn_raw(get_fn_name, vec![this_ptr], scope)
+                let getter: Arc<Box<FnGetter>> = self.find_getter(&Any::type_id(this_ptr), id)?;
+                getter(this_ptr)
             }
             Expr::Index(ref id, ref idx_raw) => {
+                let getter: Arc<Box<FnGetter>> = self.find_getter(&Any::type_id(this_ptr), id)?;
+                let mut val = getter(this_ptr)?;
                 let idx = self.eval_expr(scope, idx_raw)?;
-                let get_fn_name = "get$".to_string() + id;
-
-                let mut val = self.call_fn_raw(get_fn_name, vec![this_ptr], scope)?;
-
                 ((*val).downcast_mut() as Option<&mut Vec<Box<Any>>>)
                     .and_then(|arr| idx.downcast_ref::<i64>().map(|idx| (arr, *idx as usize)))
                     .map(|(arr, idx)| arr[idx].clone())
@@ -316,9 +460,11 @@ impl Engine {
             }
             Expr::Dot(ref inner_lhs, ref inner_rhs) => match **inner_lhs {
                 Expr::Identifier(ref id) => {
-                    let get_fn_name = "get$".to_string() + id;
-                    self.call_fn_raw(get_fn_name, vec![this_ptr], scope)
-                        .and_then(|mut v| self.get_dot_val_helper(scope, v.as_mut(), inner_rhs))
+                    let type_id = Any::type_id(this_ptr);
+
+                    let getter: Arc<Box<FnGetter>> = self.find_getter(&type_id, id)?;
+                    let mut val = getter(this_ptr)?;
+                    self.get_dot_val_helper(scope, val.as_mut(), inner_rhs)
                 }
                 _ => Err(EvalAltResult::InternalErrorMalformedDotExpression),
             },
@@ -363,6 +509,53 @@ impl Engine {
         Ok((idx_sc, idx, val))
     }
 
+    fn call_fn_double_colon(
+        &self,
+        scope: &mut Scope,
+        lhs: &Expr,
+        rhs: &Expr,
+    ) -> Result<Box<Any>, EvalAltResult> {
+        match *lhs {
+            Expr::Identifier(ref id) => {
+                if let Some(ty) = self.types.get(id) {
+                    match *rhs {
+                        Expr::FnCall(ref fn_name, ref args) => {
+                            let mut args: Vec<Box<Any>> = args
+                                .iter()
+                                .map(|arg| self.eval_expr(scope, arg))
+                                .collect::<Result<Vec<_>, _>>()?;
+
+                            let spec = FnSpec::new(
+                                fn_name.clone(),
+                                Some(args.iter().map(|a| Any::type_id(&**a)).collect())
+                            );
+
+                            let args = args.iter_mut().map(|b| b.as_mut()).collect::<Vec<_>>();
+
+                            if let Some(f) = ty.functions.get(&spec) {
+                                f(args)
+                            } else {
+                                let typenames = args.iter()
+                                    .map(|x| {
+                                        if (&**x).type_id() == ty.id {
+                                            "self".to_string()
+                                        } else {
+                                            self.format_type((&**x).type_id())
+                                        }
+                                    }).collect::<Vec<_>>();
+                                Err(EvalAltResult::ErrorFunctionNotFound(format!("{}::{}({})", ty.name, fn_name, typenames.join(","))))
+                            }
+                        },
+                        _ => Err(EvalAltResult::InternalErrorMalformedDoubleColonCall)
+                    }
+                } else {
+                    Err(EvalAltResult::ErrorUnregisteredType(id.clone()))
+                }
+            }
+            _ => Err(EvalAltResult::InternalErrorMalformedDoubleColonCall),
+        }
+    }
+
     fn get_dot_val(
         &self,
         scope: &mut Scope,
@@ -403,21 +596,20 @@ impl Engine {
     ) -> Result<Box<Any>, EvalAltResult> {
         match *dot_rhs {
             Expr::Identifier(ref id) => {
-                let set_fn_name = "set$".to_string() + id;
-                self.call_fn_raw(set_fn_name, vec![this_ptr, source_val.as_mut()], scope)
+                let type_id = Any::type_id(this_ptr);
+                let setter = self.find_setter(&type_id, id)?;
+                setter(this_ptr, source_val)?;
+                Ok(Box::new(()))
             }
             Expr::Dot(ref inner_lhs, ref inner_rhs) => match **inner_lhs {
                 Expr::Identifier(ref id) => {
-                    let get_fn_name = "get$".to_string() + id;
-                    self.call_fn_raw(get_fn_name, vec![this_ptr], scope)
-                        .and_then(|mut v| {
-                            self.set_dot_val_helper(v.as_mut(), inner_rhs, source_val, scope)
-                                .map(|_| v) // Discard Ok return value
-                        }).and_then(|mut v| {
-                            let set_fn_name = "set$".to_string() + id;
-
-                            self.call_fn_raw(set_fn_name, vec![this_ptr, v.as_mut()], scope)
-                        })
+                    let type_id = Any::type_id(this_ptr);
+                    let getter = self.find_getter(&type_id, id)?;
+                    let mut val = getter(this_ptr)?;
+                    self.set_dot_val_helper(val.as_mut(), inner_rhs, source_val, scope)?;
+                    let setter = self.find_setter(&type_id, id)?;
+                    setter(this_ptr, val)?;
+                    Ok(Box::new(()))
                 }
                 _ => Err(EvalAltResult::InternalErrorMalformedDotExpression),
             },
@@ -536,6 +728,7 @@ impl Engine {
                 }
             },
             Expr::Dot(ref lhs, ref rhs) => self.get_dot_val(scope, lhs, rhs),
+            Expr::DoubleColon(ref lhs, ref rhs) => self.call_fn_double_colon(scope, lhs, rhs),
             Expr::Array(ref contents) => {
                 let mut arr = Vec::new();
 
@@ -656,12 +849,11 @@ impl Engine {
         }
     }
 
-    fn nice_type_name(&self, b: Box<Any>) -> String {
-        let tid = (&*b).type_id();
+    fn format_type(&self, tid: TypeId) -> String {
         if let Some(name) = self.type_names.get(&tid) {
             name.to_string()
         } else {
-            format!("<unknown> {:?}", b.type_id())
+            format!("<unknown> {:?}", tid)
         }
     }
 
@@ -706,13 +898,8 @@ impl Engine {
                 let mut x: Result<Box<Any>, EvalAltResult> = Ok(Box::new(()));
 
                 for f in fns {
-                    let name = f.name.clone();
                     let local_f = f.clone();
-
-                    let spec = FnSpec {
-                        ident: name,
-                        args: None,
-                    };
+                    let spec = FnSpec::new(f.name.clone(), None);
 
                     self.fns.insert(spec, Arc::new(FnIntExt::Int(local_f)));
                 }
@@ -729,7 +916,7 @@ impl Engine {
                 match x.downcast::<T>() {
                     Ok(out) => Ok(*out),
                     Err(a) => Err(EvalAltResult::ErrorMismatchOutputType(
-                        self.nice_type_name(a),
+                        self.format_type(Any::type_id(&*a)),
                     )),
                 }
             }
@@ -787,13 +974,8 @@ impl Engine {
                     if f.params.len() > 6 {
                         return Ok(());
                     }
-                    let name = f.name.clone();
                     let local_f = f.clone();
-
-                    let spec = FnSpec {
-                        ident: name,
-                        args: None,
-                    };
+                    let spec = FnSpec::new(f.name.clone(), None);
 
                     self.fns.insert(spec, Arc::new(FnIntExt::Int(local_f)));
                 }
@@ -813,17 +995,17 @@ impl Engine {
     /// Register the default library. That means, numberic types, char, bool
     /// String, arithmetics and string concatenations.
     pub fn register_default_lib(engine: &mut Engine) {
-        engine.register_type_name::<i32>("i32");
-        engine.register_type_name::<u32>("u32");
-        engine.register_type_name::<i64>("integer");
-        engine.register_type_name::<u64>("u64");
-        engine.register_type_name::<u64>("usize");
-        engine.register_type_name::<f32>("f64");
-        engine.register_type_name::<f64>("float");
-        engine.register_type_name::<String>("string");
-        engine.register_type_name::<char>("char");
-        engine.register_type_name::<bool>("boolean");
-        engine.register_type_name::<Vec<Box<Any>>>("array");
+        register_type!(engine, i32);
+        register_type!(engine, u32);
+        register_type!(engine, i64);
+        register_type!(engine, u64);
+        register_type!(engine, usize);
+        register_type!(engine, f32);
+        register_type!(engine, f64);
+        register_type!(engine, String);
+        register_type!(engine, char);
+        register_type!(engine, bool);
+        engine.register_type(Type::new::<Vec<Box<Any>>>("array"));
 
         macro_rules! reg_op {
             ($engine:expr, $x:expr, $op:expr, $( $y:ty ),*) => (
@@ -849,81 +1031,31 @@ impl Engine {
             )
         }
 
-        fn add<T: Add>(x: T, y: T) -> <T as Add>::Output {
-            x + y
-        }
-        fn sub<T: Sub>(x: T, y: T) -> <T as Sub>::Output {
-            x - y
-        }
-        fn mul<T: Mul>(x: T, y: T) -> <T as Mul>::Output {
-            x * y
-        }
-        fn div<T: Div>(x: T, y: T) -> <T as Div>::Output {
-            x / y
-        }
-        fn neg<T: Neg>(x: T) -> <T as Neg>::Output {
-            -x
-        }
-        fn lt<T: PartialOrd>(x: T, y: T) -> bool {
-            x < y
-        }
-        fn lte<T: PartialOrd>(x: T, y: T) -> bool {
-            x <= y
-        }
-        fn gt<T: PartialOrd>(x: T, y: T) -> bool {
-            x > y
-        }
-        fn gte<T: PartialOrd>(x: T, y: T) -> bool {
-            x >= y
-        }
-        fn eq<T: PartialEq>(x: T, y: T) -> bool {
-            x == y
-        }
-        fn ne<T: PartialEq>(x: T, y: T) -> bool {
-            x != y
-        }
-        fn and(x: bool, y: bool) -> bool {
-            x && y
-        }
-        fn or(x: bool, y: bool) -> bool {
-            x || y
-        }
-        fn not(x: bool) -> bool {
-            !x
-        }
-        fn concat(x: String, y: String) -> String {
-            x + &y
-        }
-        fn binary_and<T: BitAnd>(x: T, y: T) -> <T as BitAnd>::Output {
-            x & y
-        }
-        fn binary_or<T: BitOr>(x: T, y: T) -> <T as BitOr>::Output {
-            x | y
-        }
-        fn binary_xor<T: BitXor>(x: T, y: T) -> <T as BitXor>::Output {
-            x ^ y
-        }
-        fn left_shift<T: Shl<T>>(x: T, y: T) -> <T as Shl<T>>::Output {
-            x.shl(y)
-        }
-        fn right_shift<T: Shr<T>>(x: T, y: T) -> <T as Shr<T>>::Output {
-            x.shr(y)
-        }
-        fn modulo<T: Rem<T>>(x: T, y: T) -> <T as Rem<T>>::Output {
-            x % y
-        }
-        fn pow_i64_i64(x: i64, y: i64) -> i64 {
-            x.pow(y as u32)
-        }
-        fn pow_f64_f64(x: f64, y: f64) -> f64 {
-            x.powf(y)
-        }
-        fn pow_f64_i64(x: f64, y: i64) -> f64 {
-            x.powi(y as i32)
-        }
-        fn unit_eq(a: (), b: ()) -> bool {
-            true
-        }
+        fn add<T: Add>(x: T, y: T) -> <T as Add>::Output { x + y }
+        fn sub<T: Sub>(x: T, y: T) -> <T as Sub>::Output { x - y }
+        fn mul<T: Mul>(x: T, y: T) -> <T as Mul>::Output { x * y }
+        fn div<T: Div>(x: T, y: T) -> <T as Div>::Output { x / y }
+        fn neg<T: Neg>(x: T) -> <T as Neg>::Output { -x }
+        fn lt<T: PartialOrd>(x: T, y: T) -> bool { x < y }
+        fn lte<T: PartialOrd>(x: T, y: T) -> bool { x <= y }
+        fn gt<T: PartialOrd>(x: T, y: T) -> bool { x > y }
+        fn gte<T: PartialOrd>(x: T, y: T) -> bool { x >= y }
+        fn eq<T: PartialEq>(x: T, y: T) -> bool { x == y }
+        fn ne<T: PartialEq>(x: T, y: T) -> bool { x != y }
+        fn and(x: bool, y: bool) -> bool { x && y }
+        fn or(x: bool, y: bool) -> bool { x || y }
+        fn not(x: bool) -> bool { !x }
+        fn concat(x: String, y: String) -> String { x + &y }
+        fn binary_and<T: BitAnd>(x: T, y: T) -> <T as BitAnd>::Output { x & y }
+        fn binary_or<T: BitOr>(x: T, y: T) -> <T as BitOr>::Output { x | y }
+        fn binary_xor<T: BitXor>(x: T, y: T) -> <T as BitXor>::Output { x ^ y }
+        fn left_shift<T: Shl<T>>(x: T, y: T) -> <T as Shl<T>>::Output { x.shl(y) }
+        fn right_shift<T: Shr<T>>(x: T, y: T) -> <T as Shr<T>>::Output { x.shr(y) }
+        fn modulo<T: Rem<T>>(x: T, y: T) -> <T as Rem<T>>::Output { x % y }
+        fn pow_i64_i64(x: i64, y: i64) -> i64 { x.pow(y as u32) }
+        fn pow_f64_f64(x: f64, y: f64) -> f64 { x.powf(y) }
+        fn pow_f64_i64(x: f64, y: i64) -> f64 { x.powi(y as i32) }
+        fn unit_eq(a: (), b: ()) -> bool { true }
 
         reg_op!(engine, "+", add, i32, i64, u32, u64, f32, f64);
         reg_op!(engine, "-", sub, i32, i64, u32, u64, f32, f64);
@@ -968,6 +1100,7 @@ impl Engine {
         let mut engine = Engine {
             fns: HashMap::new(),
             type_names: HashMap::new(),
+            types: HashMap::new(),
         };
 
         Engine::register_default_lib(&mut engine);
@@ -975,3 +1108,95 @@ impl Engine {
         engine
     }
 }
+
+pub struct Ref<A>(A);
+pub struct Mut<A>(A);
+
+macro_rules! count_args {
+    () => {0usize};
+    ($head:ident $($tail:ident)*) => {1usize + count_args!($($tail)*)};
+}
+
+macro_rules! def_register {
+    () => {
+        def_register!(imp);
+    };
+    (imp $($par:ident => $mark:ty => $param:ty => $clone:expr),*) => {
+        impl<$($par,)* FN, RET> RegisterFn<FN, ($($mark,)*), RET> for Engine
+        where
+            $($par: Any + Clone,)*
+            FN: Fn($($param),*) -> RET + 'static,
+            RET: Any,
+        {
+            fn register_fn(&mut self, name: &str, f: FN) {
+                let fun = move |mut args: Vec<&mut Any>| {
+                    // Check for length at the beginning to avoid
+                    // per-element bound checks.
+                    if args.len() != count_args!($($par)*) {
+                        return Err(EvalAltResult::ErrorFunctionArgMismatch);
+                    }
+
+                    let mut drain = args.drain(..);
+                    $(
+                    // Downcast every element, return in case of a type mismatch
+                    let $par = ((*drain.next().unwrap()).downcast_mut() as Option<&mut $par>)
+                        .ok_or(EvalAltResult::ErrorFunctionArgMismatch)?;
+                    )*
+
+                    // Call the user-supplied function using ($clone) to
+                    // potentially clone the value, otherwise pass the reference.
+                    Ok(Box::new(f($(($clone)($par)),*)) as Box<Any>)
+                };
+                self.register_fn_raw(name.to_owned(), Some(vec![$(TypeId::of::<$par>()),*]), Box::new(fun));
+            }
+        }
+
+        impl<$($par,)* FN, RET> RegisterTypeFn<FN, ($($mark,)*), RET> for Type
+        where
+            $($par: Any + Clone,)*
+            FN: Fn($($param),*) -> RET + 'static,
+            RET: Any,
+        {
+
+            fn add_function(mut self, name: &str, f: FN) -> Type {
+                let fun = move |mut args: Vec<&mut Any>| {
+                    // Check for length at the beginning to avoid
+                    // per-element bound checks.
+                    if args.len() != count_args!($($par)*) {
+                        return Err(EvalAltResult::ErrorFunctionArgMismatch);
+                    }
+
+                    let mut drain = args.drain(..);
+                    $(
+                    // Downcast every element, return in case of a type mismatch
+                    let $par = ((*drain.next().unwrap()).downcast_mut() as Option<&mut $par>)
+                        .ok_or(EvalAltResult::ErrorFunctionArgMismatch)?;
+                    )*
+
+                    // Call the user-supplied function using ($clone) to
+                    // potentially clone the value, otherwise pass the reference.
+                    Ok(Box::new(f($(($clone)($par)),*)) as Box<Any>)
+                };
+                let spec = FnSpec::new(name.to_string(), Some(vec![$(TypeId::of::<$par>()),*]));
+                self.functions.insert(spec, Arc::new(Box::new(fun)));
+                self
+            }
+        }
+
+        //def_register!(imp_pop $($par => $mark => $param),*);
+    };
+    ($p0:ident $(, $p:ident)*) => {
+        def_register!(imp $p0 => $p0 => $p0 => Clone::clone $(, $p => $p => $p => Clone::clone)*);
+        def_register!(imp $p0 => Ref<$p0> => &$p0 => |x| { x } $(, $p => $p => $p => Clone::clone)*);
+        def_register!(imp $p0 => Mut<$p0> => &mut $p0 => |x| { x } $(, $p => $p => $p => Clone::clone)*);
+
+        def_register!($($p),*);
+    };
+//    (imp_pop) => {};
+//    (imp_pop $head:ident => $head_mark:ty => $head_param:ty $(,$tail:ident => $tail_mark:ty => $tp:ty)*) => {
+//        def_register!(imp $($tail => $tail_mark => $tp),*);
+//    };
+}
+
+#[cfg_attr(rustfmt, rustfmt_skip)]
+def_register!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S);

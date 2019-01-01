@@ -1,7 +1,7 @@
+#[macro_use]
 extern crate rhai;
 
-use rhai::Engine;
-use rhai::RegisterFn;
+use rhai::{Engine, Type, RegisterTypeFn};
 
 #[test]
 fn test_get_set() {
@@ -11,14 +11,6 @@ fn test_get_set() {
     }
 
     impl TestStruct {
-        fn get_x(&mut self) -> i64 {
-            self.x
-        }
-
-        fn set_x(&mut self, new_x: i64) {
-            self.x = new_x;
-        }
-
         fn new() -> TestStruct {
             TestStruct { x: 1 }
         }
@@ -26,16 +18,13 @@ fn test_get_set() {
 
     let mut engine = Engine::new();
 
-    engine.register_type::<TestStruct>();
+    register_type!(engine, TestStruct,
+        fields: x;
+        functions: new
+    );
 
-    engine.register_get_set("x", TestStruct::get_x, TestStruct::set_x);
-    engine.register_fn("new_ts", TestStruct::new);
-
-    if let Ok(result) = engine.eval::<i64>("let a = new_ts(); a.x = 500; a.x") {
-        assert_eq!(result, 500);
-    } else {
-        assert!(false);
-    }
+    let result = engine.eval::<i64>("let a = TestStruct::new(); a.x = 500; a.x");
+    assert_eq!(result.unwrap(), 500);
 }
 
 #[test]
@@ -46,14 +35,6 @@ fn test_big_get_set() {
     }
 
     impl TestChild {
-        fn get_x(&mut self) -> i64 {
-            self.x
-        }
-
-        fn set_x(&mut self, new_x: i64) {
-            self.x = new_x;
-        }
-
         fn new() -> TestChild {
             TestChild { x: 1 }
         }
@@ -65,14 +46,6 @@ fn test_big_get_set() {
     }
 
     impl TestParent {
-        fn get_child(&mut self) -> TestChild {
-            self.child.clone()
-        }
-
-        fn set_child(&mut self, new_child: TestChild) {
-            self.child = new_child;
-        }
-
         fn new() -> TestParent {
             TestParent { child: TestChild::new() }
         }
@@ -80,13 +53,15 @@ fn test_big_get_set() {
 
     let mut engine = Engine::new();
 
-    engine.register_type::<TestChild>();
-    engine.register_type::<TestParent>();
+    register_type!(engine, TestChild,
+        fields: x;
+        functions: new
+    );
 
-    engine.register_get_set("x", TestChild::get_x, TestChild::set_x);
-    engine.register_get_set("child", TestParent::get_child, TestParent::set_child);
+    register_type!(engine, TestParent,
+        fields: child;
+        functions: new
+    );
 
-    engine.register_fn("new_tp", TestParent::new);
-
-    assert_eq!(engine.eval::<i64>("let a = new_tp(); a.child.x = 500; a.child.x"), Ok(500));
+    assert_eq!(engine.eval::<i64>("let a = TestParent::new(); a.child.x = 500; a.child.x"), Ok(500));
 }

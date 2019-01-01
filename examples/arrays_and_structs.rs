@@ -1,5 +1,6 @@
+#[macro_use]
 extern crate rhai;
-use rhai::{Engine, RegisterFn};
+use rhai::{Engine, Type, RegisterTypeFn};
 
 #[derive(Clone, Debug)]
 struct TestStruct {
@@ -19,11 +20,10 @@ impl TestStruct {
 fn main() {
     let mut engine = Engine::new();
 
-    engine.register_type::<TestStruct>();
+    register_type!(engine, TestStruct,
+        functions: new, update
+    );
 
-    engine.register_fn("update", TestStruct::update);
-    engine.register_fn("new_ts", TestStruct::new);
-
-    println!("{:?}", engine.eval::<TestStruct>("let x = new_ts(); x.update(); x"));
-    println!("{:?}", engine.eval::<TestStruct>("let x = [new_ts()]; x[0].update(); x[0]"));
+    println!("{:?}", engine.eval::<TestStruct>("let x = TestStruct::new(); x.update(); x"));
+    println!("{:?}", engine.eval::<TestStruct>("let x = [TestStruct::new()]; x[0].update(); x[0]"));
 }

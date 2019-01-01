@@ -1,7 +1,7 @@
+#[macro_use]
 extern crate rhai;
 
-use rhai::Engine;
-use rhai::RegisterFn;
+use rhai::{Engine, Type, RegisterTypeFn};
 
 #[test]
 fn test_method_call() {
@@ -22,15 +22,12 @@ fn test_method_call() {
 
     let mut engine = Engine::new();
 
-    engine.register_type::<TestStruct>();
+    register_type!(engine, TestStruct,
+        fields: x;
+        functions: new, update
+    );
 
-    engine.register_fn("update", TestStruct::update);
-    engine.register_fn("new_ts", TestStruct::new);
-
-    if let Ok(result) = engine.eval::<TestStruct>("let x = new_ts(); x.update(); x") {
-        assert_eq!(result.x, 1001);
-    } else {
-        assert!(false);
-    }
+    let result = engine.eval::<TestStruct>("let x = TestStruct::new(); x.update(); x");
+    assert_eq!(result.unwrap().x, 1001);
 
 }

@@ -48,6 +48,5 @@ mod fn_register;
 mod parser;
 
 pub use any::Any;
-pub use engine::{Engine, EvalAltResult, Scope};
-pub use fn_register::RegisterFn;
-
+pub use engine::{Engine, Type, EvalAltResult, Scope};
+pub use fn_register::{RegisterFn, RegisterTypeFn};

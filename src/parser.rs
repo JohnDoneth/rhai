@@ -108,6 +108,7 @@ pub enum Expr {
     FnCall(String, Vec<Expr>),
     Assignment(Box<Expr>, Box<Expr>),
     Dot(Box<Expr>, Box<Expr>),
+    DoubleColon(Box<Expr>, Box<Expr>),
     Index(String, Box<Expr>),
     Array(Vec<Expr>),
     Loop(Box<Stmt>),
@@ -138,6 +139,7 @@ pub enum Token {
     Divide,
     Semicolon,
     Colon,
+    DoubleColon,
     Comma,
     Period,
     Equals,
@@ -604,7 +606,14 @@ impl<'a> TokenIterator<'a> {
                     }
                 }
                 ';' => return Some(Token::Semicolon),
-                ':' => return Some(Token::Colon),
+                ':' =>
+                    match self.char_stream.peek() {
+                        Some(&':') => {
+                            self.char_stream.next();
+                            return Some(Token::DoubleColon);
+                        }
+                        _ => return Some(Token::Colon),
+                    },
                 ',' => return Some(Token::Comma),
                 '.' => return Some(Token::Period),
                 '=' => {
@@ -781,7 +790,8 @@ fn get_precedence(token: &Token) -> i32 {
         Token::LeftShift
         | Token::RightShift => 50,
         Token::Modulo => 60,
-        Token::Period => 100,
+        Token::Period
+        | Token::DoubleColon => 100,
         _ => -1,
     }
 }
@@ -1001,6 +1011,7 @@ fn parse_binop(input: &mut Peekable<TokenIterator>,
                     )
                 },
                 Token::Period => Expr::Dot(Box::new(lhs_curr), Box::new(rhs)),
+                Token::DoubleColon => Expr::DoubleColon(Box::new(lhs_curr), Box::new(rhs)),
                 Token::EqualTo => Expr::FnCall("==".to_string(), vec![lhs_curr, rhs]),
                 Token::NotEqualTo => Expr::FnCall("!=".to_string(), vec![lhs_curr, rhs]),
                 Token::LessThan => Expr::FnCall("<".to_string(), vec![lhs_curr, rhs]),
