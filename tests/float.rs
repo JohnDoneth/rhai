@@ -40,7 +40,7 @@ fn struct_with_float() {
         functions: new, update
     );
 
-    let result = engine.eval::<f64>("let ts = TestStruc::new(); ts.update(); ts.x");
+    let result = engine.eval::<f64>("let ts = TestStruct::new(); ts.update(); ts.x");
     assert_eq!(result.unwrap(), 6.789);
 
     let result = engine.eval::<f64>("let ts = TestStruct::new(); ts.x = 10.1001; ts.x");
