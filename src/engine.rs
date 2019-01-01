@@ -59,11 +59,9 @@ macro_rules! register_type {
 pub enum EvalAltResult {
     ErrorFunctionNotFound(String),
     ErrorFunctionArgMismatch,
-    ErrorFunctionCallNotSupported,
     ErrorIndexMismatch,
     ErrorIfGuardMismatch,
     ErrorVariableNotFound(String),
-    ErrorFunctionArityNotSupported,
     ErrorAssignmentToUnknownLHS,
     ErrorUnregisteredType(String),
     ErrorMismatchOutputType(String),
@@ -93,11 +91,9 @@ impl PartialEq for EvalAltResult {
         match (self, other) {
             (&ErrorFunctionNotFound(ref a), &ErrorFunctionNotFound(ref b)) => a == b,
             (&ErrorFunctionArgMismatch, &ErrorFunctionArgMismatch) => true,
-            (&ErrorFunctionCallNotSupported, &ErrorFunctionCallNotSupported) => true,
             (&ErrorIndexMismatch, &ErrorIndexMismatch) => true,
             (&ErrorIfGuardMismatch, &ErrorIfGuardMismatch) => true,
             (&ErrorVariableNotFound(ref a), &ErrorVariableNotFound(ref b)) => a == b,
-            (&ErrorFunctionArityNotSupported, &ErrorFunctionArityNotSupported) => true,
             (&ErrorAssignmentToUnknownLHS, &ErrorAssignmentToUnknownLHS) => true,
             (&ErrorMismatchOutputType(ref a), &ErrorMismatchOutputType(ref b)) => a == b,
             (&ErrorUnregisteredType(ref a), &ErrorUnregisteredType(ref b)) => a == b,
@@ -114,15 +110,9 @@ impl Error for EvalAltResult {
         match *self {
             EvalAltResult::ErrorFunctionNotFound(_) => "Function not found",
             EvalAltResult::ErrorFunctionArgMismatch => "Function argument types do not match",
-            EvalAltResult::ErrorFunctionCallNotSupported => {
-                "Function call with > 2 argument not supported"
-            }
             EvalAltResult::ErrorIndexMismatch => "Index does not match array",
             EvalAltResult::ErrorIfGuardMismatch => "If guards expect boolean expression",
             EvalAltResult::ErrorVariableNotFound(_) => "Variable not found",
-            EvalAltResult::ErrorFunctionArityNotSupported => {
-                "Functions of more than 3 parameters are not yet supported"
-            }
             EvalAltResult::ErrorAssignmentToUnknownLHS => {
                 "Assignment to an unsupported left-hand side"
             }
@@ -309,40 +299,23 @@ impl Engine {
             args.iter().map(|x| (&**x).type_id()).collect::<Vec<_>>()
         );
 
-        let spec = FnSpec::new(
-            ident.clone(),
-            if !args.is_empty() {
-                Some(args.iter().map(|a| Any::type_id(&**a)).collect())
-            } else {
-                None
-            }
-        );
-
         let prev_len = scope.len();
-        let res = self
-            .fns.get(&spec)
-            .ok_or_else(|| {
-                let typenames = args
-                    .iter()
-                    .map(|x| self.format_type((&**x).type_id()))
-                    .collect::<Vec<_>>();
-                EvalAltResult::ErrorFunctionNotFound(format!("{} ({})", ident, typenames.join(",")))
-            }).and_then(|f| match **f {
-                FnIntExt::Ext(ref f) => f(args),
-                FnIntExt::Int(ref f) => {
-                    scope.extend(
-                        f.params
-                            .iter()
-                            .cloned()
-                            .zip(args.iter().map(|x| (&**x).box_clone())),
-                    );
+        let res = match *self.find_fn(&ident, &args)? {
+            FnIntExt::Ext(ref f) => f(args),
+            FnIntExt::Int(ref f) => {
+                scope.extend(
+                    f.params
+                        .iter()
+                        .cloned()
+                        .zip(args.iter().map(|x| (&**x).box_clone())),
+                );
 
-                    match self.eval_stmt(scope, &*f.body) {
-                        Err(EvalAltResult::Return(x)) => Ok(x),
-                        other => other,
-                    }
+                match self.eval_stmt(scope, &*f.body) {
+                    Err(EvalAltResult::Return(x)) => Ok(x),
+                    other => other,
                 }
-            });
+            }
+        };
         while scope.len() > prev_len {
             scope.pop();
         }
@@ -396,6 +369,22 @@ impl Engine {
             }
         }
         Err(EvalAltResult::ErrorVariableNotFound(format!("{}.{}", ty.name, name)))
+    }
+
+    fn find_fn(&self, name: &String, args: &Vec<&mut Any>) -> Result<Arc<FnIntExt>, EvalAltResult> {
+        let spec = FnSpec::new(
+            name.clone(),
+            Some(args.iter().map(|a| Any::type_id(&**a)).collect())
+        );
+        if let Some(f) = self.fns.get(&spec) {
+            Ok(f.clone())
+        } else {
+            let typenames = args
+                .iter()
+                .map(|x| self.format_type((&**x).type_id()))
+                .collect::<Vec<_>>();
+            Err(EvalAltResult::ErrorFunctionNotFound(format!("{}({})", name, typenames.join(","))))
+        }
     }
 
     fn find_type_fn(&self, tid: &TypeId, name: &String, args: &Vec<&mut Any>) -> Result<Arc<Box<FnAny>>, EvalAltResult> {
@@ -525,26 +514,10 @@ impl Engine {
                                 .map(|arg| self.eval_expr(scope, arg))
                                 .collect::<Result<Vec<_>, _>>()?;
 
-                            let spec = FnSpec::new(
-                                fn_name.clone(),
-                                Some(args.iter().map(|a| Any::type_id(&**a)).collect())
-                            );
-
                             let args = args.iter_mut().map(|b| b.as_mut()).collect::<Vec<_>>();
 
-                            if let Some(f) = ty.functions.get(&spec) {
-                                f(args)
-                            } else {
-                                let typenames = args.iter()
-                                    .map(|x| {
-                                        if (&**x).type_id() == ty.id {
-                                            "self".to_string()
-                                        } else {
-                                            self.format_type((&**x).type_id())
-                                        }
-                                    }).collect::<Vec<_>>();
-                                Err(EvalAltResult::ErrorFunctionNotFound(format!("{}::{}({})", ty.name, fn_name, typenames.join(","))))
-                            }
+                            let f = self.find_type_fn(&ty.id, fn_name, &args)?;
+                            f(args)
                         },
                         _ => Err(EvalAltResult::InternalErrorMalformedDoubleColonCall)
                     }
