@@ -143,8 +143,9 @@ You can also see in this example how you can register multiple functions (or in 
 Here's an more complete example of working with Rust.  First the example, then we'll break it into parts:
 
 ```rust
+#[macro_use]
 extern crate rhai;
-use rhai::{Engine, RegisterFn};
+use rhai::{Engine, Type, RegisterTypeFn};
 
 #[derive(Clone)]
 struct TestStruct {
@@ -164,12 +165,11 @@ impl TestStruct {
 fn main() {
     let mut engine = Engine::new();
 
-    engine.register_type::<TestStruct>();
+    register_type!(engine, TestStruct,
+        functions: new, update
+    );
 
-    engine.register_fn("update", TestStruct::update);
-    engine.register_fn("new_ts", TestStruct::new);
-
-    if let Ok(result) = engine.eval::<TestStruct>("let x = new_ts(); x.update(); x") {
+    if let Ok(result) = engine.eval::<TestStruct>("let x = TestStruct::new(); x.update(); x") {
         println!("result: {}", result.x); // prints 1001
     }
 }
@@ -198,28 +198,28 @@ impl TestStruct {
 
 let mut engine = Engine::new();
 
-engine.register_type::<TestStruct>();
 ```
 
-To use methods and functions with the engine, we need to register them.  There are some convenience functions to help with this.  Below I register update and new with the engine.
+To use methods and functions of a type with the engine, we need to register them. There is a macro that wil help us to do that.
 
-*Note: the engine follows the convention that methods use a &mut first parameter so that invoking methods can update the value in memory.*
+*Note: the engine follows the convention that methods use a &mut first parameter so that invoking methods can update the value in memory. (For now it doesn't work for double-colon invocation like TestStruct::update(x) because x is being copied and then modified)*
 
 ```rust
-engine.register_fn("update", TestStruct::update);
-engine.register_fn("new_ts", TestStruct::new);
+register_type!(engine, TestStruct,
+    functions: new, update
+);
 ```
 
-Finally, we call our script.  The script can see the function and method we registered earlier.  We need to get the result back out from script land just as before, this time casting to our custom struct type.
+Finally, we call our script.  The script can see the function and type we registered earlier.  We need to get the result back out from script land just as before, this time casting to our custom struct type.
 ```rust
-if let Ok(result) = engine.eval::<TestStruct>("let x = new_ts(); x.update(); x") {
+if let Ok(result) = engine.eval::<TestStruct>("let x = TestStruct::new(); x.update(); x") {
     println!("result: {}", result.x); // prints 1001
 }
 ```
 
 # Getters and setters
 
-Similarly, you can work with members of your custom types.  This works by registering a 'get' or a 'set' function for working with your struct.
+Similarly, you can work with fields of your custom types.
 
 For example:
 
@@ -230,14 +230,6 @@ struct TestStruct {
 }
 
 impl TestStruct {
-    fn get_x(&mut self) -> i64 {
-        self.x
-    }
-
-    fn set_x(&mut self, new_x: i64) {
-        self.x = new_x;
-    }
-
     fn new() -> TestStruct {
         TestStruct { x: 1 }
     }
@@ -245,12 +237,12 @@ impl TestStruct {
 
 let mut engine = Engine::new();
 
-engine.register_type::<TestStruct>();
+register_type!(engine, TestStruct,
+    fields: x;
+    functions: new
+);
 
-engine.register_get_set("x", TestStruct::get_x, TestStruct::set_x);
-engine.register_fn("new_ts", TestStruct::new);
-
-if let Ok(result) = engine.eval::<i64>("let a = new_ts(); a.x = 500; a.x") {
+if let Ok(result) = engine.eval::<i64>("let a = TestStruct::new(); a.x = 500; a.x") {
     println!("result: {}", result);
 }
 ```
@@ -359,7 +351,7 @@ print(y[1]);
 ## Members and methods
 
 ```rust
-let a = new_ts();
+let a = TestStruct::new();
 a.x = 500;
 a.update();
 ```
