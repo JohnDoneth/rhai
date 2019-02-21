@@ -1288,8 +1288,8 @@ fn parse_top_level(input: &mut Peekable<TokenIterator>)
     let mut stmts = Vec::new();
     let mut fndefs = Vec::new();
 
-    while let Some(t) = input.peek() {
-        match t {
+    while input.peek().is_some() {
+        match input.peek() {
             Some(&Token::Fn) => fndefs.push(parse_fn(input)?),
             _ => stmts.push(parse_stmt(input)?),
         }
