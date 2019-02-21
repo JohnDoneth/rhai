@@ -1004,6 +1004,26 @@ impl Engine {
             )
         }
 
+        /*
+        fn add_assign<T: AddAssign>(x: &mut T, y: T) { (*x) += y }
+
+        engine.register_fn("+=", add_assign as fn(x: &mut i32, y: i32) -> ());
+        engine.register_fn("+=", add_assign as fn(x: &mut i64, y: i64) -> ());
+        engine.register_fn("+=", add_assign as fn(x: &mut u32, y: u32) -> ());
+        engine.register_fn("+=", add_assign as fn(x: &mut u64, y: u64) -> ());
+        engine.register_fn("+=", add_assign as fn(x: &mut f32, y: f32) -> ());
+        engine.register_fn("+=", add_assign as fn(x: &mut f64, y: f64) -> ());
+
+        fn sub_assign<T: SubAssign>(x: &mut T, y: T) { (*x) -= y }
+
+        engine.register_fn("-=", sub_assign as fn(x: &mut i32, y: i32) -> ());
+        engine.register_fn("-=", sub_assign as fn(x: &mut i64, y: i64) -> ());
+        engine.register_fn("-=", sub_assign as fn(x: &mut u32, y: u32) -> ());
+        engine.register_fn("-=", sub_assign as fn(x: &mut u64, y: u64) -> ());
+        engine.register_fn("-=", sub_assign as fn(x: &mut f32, y: f32) -> ());
+        engine.register_fn("-=", sub_assign as fn(x: &mut f64, y: f64) -> ());
+        */
+
         fn add<T: Add>(x: T, y: T) -> <T as Add>::Output { x + y }
         fn sub<T: Sub>(x: T, y: T) -> <T as Sub>::Output { x - y }
         fn mul<T: Mul>(x: T, y: T) -> <T as Mul>::Output { x * y }
